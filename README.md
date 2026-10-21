@@ -1,6 +1,6 @@
 # argus-panoptes
 
-Detection engineering et triage agentique d'un serveur exposé derrière un firewall : règles de détection portables (Sigma), SIEM d'entreprise, triage et réponse active par agents sans framework, le tout mesuré.
+Detection engineering et triage agentique d'un serveur exposé derrière un firewall : règles de détection portables (Sigma), SIEM d'entreprise, triage et réponse active par agents sans framework, infrastructure reproductible et supervisée, le tout mesuré.
 
 > **Statut : en cours de conception (v0).** Rien de ce qui suit n'est encore implémenté, ce document fixe la cible.
 
@@ -14,13 +14,12 @@ Surveiller en continu un serveur protégé par OPNsense, transformer les alertes
 - **Pas de framework d'agents** (ni CrewAI, ni LangGraph). Chaque agent est une fonction Python consommant un topic Kafka, appelant Ollama directement avec une sortie structurée (Pydantic), puis publiant sur le topic suivant. Pipeline déterministe, testable étape par étape, lisible ligne par ligne.
 - **LLM local** via Ollama : aucune donnée de sécurité ne quitte l'infrastructure.
 - **Corrélation vectorielle** (Qdrant) pour repérer campagnes et IP récurrentes par similarité de comportement.
-- **Déploiement simple** : Docker Compose + Ansible, pas de Kubernetes pour ce périmètre.
+- **Infrastructure as code, sans Kubernetes.** Configuration par Ansible et Docker Compose ; le périmètre ne justifie pas d'orchestrateur.
 
 ## Détection (detection-as-code)
 
 - **Sigma = source de vérité.** Les règles vivent dans `detections/sigma/`, une règle par comportement visé, avec ses tags MITRE ATT&CK.
 - **Portabilité** : conversion via pySigma vers Elastic (cible principale), Splunk SPL (validation de portabilité, Splunk Free suffit) et Wazuh.
-- **CI GitHub Actions** : lint, conversion et test de chaque règle contre des jeux de logs positifs et négatifs.
 - **Chaque alerte est expliquée** : quelle règle, quel événement, pourquoi c'est suspect, quelle technique ATT&CK.
 
 ## Lab et télémétrie
@@ -28,6 +27,27 @@ Surveiller en continu un serveur protégé par OPNsense, transformer les alertes
 - **Serveur défendu** derrière OPNsense (VM sur ESXi).
 - **Télémétrie** : Sysmon (Windows), auditd (Linux), Suricata (Zeek optionnel).
 - **Mini-lab Active Directory** isolé du LAN personnel : 1 contrôleur de domaine + 1 poste Windows avec Sysmon, cible des simulations Atomic Red Team. La détection en entreprise se joue surtout sur Windows/AD.
+
+## Infrastructure et automatisation
+
+### Déploiement
+
+- **Ansible** configure les machines : Elastic, agents Wazuh, Sysmon, Suricata, services du pipeline. Rôles versionnés dans `infra/ansible/`, rejouables à l'identique.
+- **Création des VM sur ESXi** : approche à trancher. Le provider vSphere d'OpenTofu suppose en général un vCenter ; sur un ESXi seul, il faut un provider communautaire plus limité. Repli : une VM modèle documentée, clonée manuellement, puis configurée par Ansible.
+
+### Contrôles automatiques (GitHub Actions)
+
+- **Règles Sigma** : lint, conversion et test contre des jeux de logs positifs et négatifs.
+- **Code Python** : `ruff`, `pytest`, dont les tests de logs piégés (prompt injection).
+- **Infrastructure** : `ansible-lint` (et `tofu validate` / `checkov` si OpenTofu est retenu).
+- **Secrets** : `gitleaks` sur chaque commit.
+- **Limite assumée** : la CI fait des vérifications statiques. Les runners GitHub ne voient pas le lab, et aucun runner auto-hébergé n'est branché sur un dépôt public (il exécuterait le code de n'importe quelle pull request sur le réseau local).
+
+### Supervision (Prometheus / Grafana)
+
+- **Périmètre** : santé du pipeline, pas les données de sécurité (déjà dans Kibana). Retard des topics Kafka, latence de chaque agent, volume d'alertes et de décisions, temps de réponse d'Ollama, ressources des VM (`node_exporter`).
+- **Lien avec l'évaluation** : ces mesures alimentent les métriques de la v1.0 (temps de triage, latence et coût par décision).
+- **Mise en place tardive** : après les premiers agents, quand il y a quelque chose à mesurer.
 
 ## Les agents
 
@@ -84,7 +104,9 @@ Le but est de chiffrer l'apport des agents, pas de l'affirmer.
 | Base vectorielle | Qdrant |
 | Pare-feu / réponse active | OPNsense (API) |
 | Simulation d'attaques | Atomic Red Team |
-| CI / déploiement | GitHub Actions, Docker Compose, Ansible |
+| Déploiement | Ansible, Docker Compose (OpenTofu à évaluer) |
+| CI | GitHub Actions : ruff, pytest, ansible-lint, gitleaks |
+| Supervision | Prometheus, Grafana, node_exporter |
 | Frontend | React + WebSocket |
 | Plus tard | TheHive/Cortex (ou Shuffle), MISP/OpenCTI |
 
@@ -92,19 +114,21 @@ Le but est de chiffrer l'apport des agents, pas de l'affirmer.
 
 - **Kafka** : Elastic alerte déjà. Kafka ne se justifie que pour découpler les étapes et rejouer les alertes. À confirmer, sinon file plus légère.
 - **Wazuh + Elastic** : deux couches de collecte. À garder seulement si Wazuh apporte une valeur propre (intégrité des fichiers, détection hôte) ; sinon Elastic Agent seul.
-- **Ressources ESXi** : Elastic, Ollama, Qdrant et le lab AD sur la même machine, à dimensionner avant de s'engager.
+- **Ressources ESXi** : Elastic, Ollama, Qdrant, le lab AD et la supervision sur la même machine, à dimensionner avant de s'engager.
+- **Création des VM** : OpenTofu avec un provider ESXi, ou VM modèle clonée puis Ansible.
 
 ## Roadmap
 
-- [ ] **v0.1** : Elastic + agents Wazuh, collecte OPNsense / SSH / auditd, schémas Pydantic des alertes
-- [ ] **v0.2** : dépôt de règles Sigma avec tags ATT&CK, conversion pySigma, CI GitHub Actions
+- [ ] **v0.1** : Elastic + agents Wazuh déployés par Ansible, collecte OPNsense / SSH / auditd, schémas Pydantic des alertes, `gitleaks` en CI
+- [ ] **v0.2** : dépôt de règles Sigma avec tags ATT&CK, conversion pySigma, CI des règles
 - [ ] **v0.3** : mini-lab AD + Sysmon + Atomic Red Team, **première mesure de baseline (règles seules)**
 - [ ] **v0.4** : Hermès et Hécate (enrichissement et classification)
 - [ ] **v0.5** : Momos et Thémis, décision en mode recommandation uniquement
-- [ ] **v0.6** : Némésis, blocage OPNsense avec allowlist et expiration
-- [ ] **v0.7** : durcissement prompt injection et tests de logs piégés
-- [ ] **v0.8** : Mnémosyne, corrélation Qdrant
-- [ ] **v0.9** : carte live
+- [ ] **v0.6** : supervision Prometheus / Grafana du pipeline
+- [ ] **v0.7** : Némésis, blocage OPNsense avec allowlist et expiration
+- [ ] **v0.8** : durcissement prompt injection et tests de logs piégés
+- [ ] **v0.9** : Mnémosyne, corrélation Qdrant
+- [ ] **v0.10** : carte live
 - [ ] **v1.0** : évaluation chiffrée contre la baseline, documentation, démo
 - [ ] **v2** : TheHive/Cortex (ou Shuffle) pour la gestion de cas, MISP/OpenCTI, honeypot comme source supplémentaire
 
